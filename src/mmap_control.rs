@@ -58,16 +58,6 @@ impl MmapControl {
         return &self.mmap[entry.key_start as usize..entry.key_end as usize];
     }
     
-    pub(crate) fn write_value(&mut self, entry: &SupportEntry, data: &[u8]) {
-        self.mmap[entry.value_start as usize..entry.value_end as usize].copy_from_slice(data);
-    }
-    
-    pub(crate) fn write_key(&mut self, entry: &SupportEntry, data: &[u8]) {
-        self.mmap[entry.key_start as usize..entry.key_end as usize].copy_from_slice(data);
-    }
-    
-    
-    
     pub(crate) fn resize(&mut self, new_size: u64) -> Result<(), Box<dyn Error>> {
         let db_options = OpenOptions::new()
             .read(true)
