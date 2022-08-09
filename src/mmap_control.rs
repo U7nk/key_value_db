@@ -21,16 +21,16 @@ impl MmapControl {
             .open(&path)
             .expect("Failed to open db file");
         options.set_len(size).unwrap();
-        
+
         let mmap = unsafe {
             MmapOptions::new()
                 .map_mut(&options)
                 .expect("Failed to map db file")
         };
-        
+
         return MmapControl {
             mmap,
-            path
+            path,
         };
     }
 
@@ -49,15 +49,15 @@ impl MmapControl {
             .try_into()
             .unwrap());
     }
-    
+
     pub(crate) fn read_value(&self, entry: &SupportEntry) -> &[u8] {
         return &self.mmap[entry.value_start as usize..entry.value_end as usize];
     }
-    
+
     pub(crate) fn read_key(&self, entry: &SupportEntry) -> &[u8] {
         return &self.mmap[entry.key_start as usize..entry.key_end as usize];
     }
-    
+
     pub(crate) fn resize(&mut self, new_size: u64) -> Result<(), Box<dyn Error>> {
         let db_options = OpenOptions::new()
             .read(true)

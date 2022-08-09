@@ -96,7 +96,7 @@ impl DB {
                 Err(e) if e.is::<SupportFileTooSmall>() => {
                     self.support_memory.resize((self.support_memory.len() * 2) as u64).unwrap();
                     self.rehash_entries();
-                    
+
                     Self::write_entry_internal(&mut self.db_memory, &mut self.support_memory, &self.mem_table.entries[i]).unwrap();
                 }
                 other_err => { other_err.unwrap(); }
@@ -112,17 +112,17 @@ impl DB {
         if support_memory.len() < aligned_index + SupportEntry::DB_SUPPORT_ENTRY_SIZE {
             return Err(Box::new(SupportFileTooSmall));
         }
-        
+
         let value_mem_addr_end = u32::from_le_bytes(db_memory.read(0, 4).try_into().unwrap());
-        
+
         let key_start = value_mem_addr_end;
         let key_end = key_start + entry.key.len() as u32;
-        
+
         let value_start: u32 = key_end;
         let value_end = value_start + entry.value.len() as u32;
 
         let mut db_mem_buf = vec![0u8; entry.key.len() + entry.value.len() + Self::DB_VALUE_LEN_SIZE + Self::DB_KEY_LEN_SIZE];
-        let mem_buf_key_end = entry.key.len(); 
+        let mem_buf_key_end = entry.key.len();
         db_mem_buf[0..mem_buf_key_end]
             .copy_from_slice(entry.key.as_bytes());
         let mem_buf_value_end = mem_buf_key_end + entry.value.len();
@@ -142,7 +142,7 @@ impl DB {
         support_entry.value_end = value_end;
         support_entry.is_occupied = true;
 
-        
+
         let mut walking_entry = support_memory.read_support_entry(aligned_index);
         let mut current_psl = 0;
         let mut walking_entry_is_occupied = walking_entry.is_occupied;
@@ -165,7 +165,7 @@ impl DB {
             }
         }
         support_entry.probe_sequence_length = current_psl;
-        
+
         db_memory.write(value_mem_addr_end as usize, &db_mem_buf);
         db_memory.write(0, &(value_mem_addr_end + db_mem_buf.len() as u32).to_le_bytes());
         support_memory.write(aligned_index, &support_entry.to_bytes());
@@ -311,8 +311,7 @@ mod tests {
 
         return result;
     }
-
-    #[test]
+    
     fn file_options_playground() {
         let mut opt = OpenOptions::new()
             .read(true)
@@ -350,22 +349,20 @@ mod tests {
         for i in 0..150_000 {
             if i % 10 == 0 {
                 let key = format!("key_{}", i);
-                println!("{}", db.get(&key)?);
+                let _value = db.get(&key)?;
             }
         }
 
         Ok(())
     }
-
     #[test]
     fn db_fast_read_write_test() {
         let _ = fs::remove_dir_all("test");
         fs::create_dir("test").unwrap();
         db_fast_read_write_test_inner().unwrap();
     }
-
-    #[test]
-    fn hash_test() {
+    
+    fn _hash_test() {
         let mut foo = Vec::<u64>::new();
         let mut cnt = HashMap::new();
         let combs = combinations(3, None);

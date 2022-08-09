@@ -7,7 +7,7 @@ pub struct Entry {
     pub value: String,
 }
 
-impl Eq for Entry { }
+impl Eq for Entry {}
 
 impl PartialEq<Self> for Entry {
     fn eq(&self, other: &Self) -> bool {
@@ -26,12 +26,12 @@ impl Ord for Entry {
         return self.key.cmp(&other.key);
     }
 }
+
 pub struct MemTable {
     pub entries: Vec<Entry>,
 }
 
 impl<'mem_table> MemTable {
-    
     pub fn new() -> MemTable {
         return MemTable {
             entries: Vec::new(),
@@ -43,7 +43,7 @@ impl<'mem_table> MemTable {
             key: key.to_string(),
             value: value.to_string(),
         });
-        
+
         self.entries.sort();
         if self.entries.len() == 1 {
             return true;
@@ -51,7 +51,7 @@ impl<'mem_table> MemTable {
 
         return false;
     }
-    
+
     pub fn get(&self, key: &String) -> Option<&String> {
         let mut i = 0;
         while i < self.entries.len() {
