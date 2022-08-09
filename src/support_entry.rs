@@ -1,5 +1,3 @@
-
-
 pub(crate) struct SupportEntry {
     pub(crate) is_occupied: bool,
     pub(crate) probe_sequence_length: u32,
@@ -10,7 +8,6 @@ pub(crate) struct SupportEntry {
 }
 
 impl SupportEntry {
-    
     pub(crate) const DB_SUPPORT_ENTRY_SIZE: usize =
         Self::DB_SUPPORT_IS_OCCUPIED_END - Self::DB_SUPPORT_IS_OCCUPIED_START
             +
@@ -51,15 +48,21 @@ impl SupportEntry {
             value_end: u32::from_le_bytes([mem[17], mem[18], mem[19], mem[20]]),
         };
     }
-    
+
     pub(crate) fn to_bytes(&self) -> [u8; Self::DB_SUPPORT_ENTRY_SIZE] {
         let mut mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = [0; Self::DB_SUPPORT_ENTRY_SIZE];
-        mem[0] = if self.is_occupied { 1 } else { 0 };
-        mem[1..5].copy_from_slice(self.probe_sequence_length.to_le_bytes().as_slice());
-        mem[5..9].copy_from_slice(self.key_start.to_le_bytes().as_slice());
-        mem[9..13].copy_from_slice(self.key_end.to_le_bytes().as_slice());
-        mem[13..17].copy_from_slice(self.value_start.to_le_bytes().as_slice());
-        mem[17..21].copy_from_slice(self.value_end.to_le_bytes().as_slice());
+        mem[Self::DB_SUPPORT_IS_OCCUPIED_START..Self::DB_SUPPORT_IS_OCCUPIED_END]
+            .copy_from_slice(if self.is_occupied { &[1u8;1] } else { &[0u8;1] } );
+        mem[Self::DB_SUPPORT_PSL_START..Self::DB_SUPPORT_PSL_END]
+            .copy_from_slice(&self.probe_sequence_length.to_le_bytes());
+        mem[Self::DB_SUPPORT_KEY_START_START..Self::DB_SUPPORT_KEY_START_END]
+            .copy_from_slice(&self.key_start.to_le_bytes());
+        mem[Self::DB_SUPPORT_KEY_END_START..Self::DB_SUPPORT_KEY_END_END]
+            .copy_from_slice(&self.key_end.to_le_bytes());
+        mem[Self::DB_SUPPORT_VALUE_START_START..Self::DB_SUPPORT_VALUE_START_END]
+            .copy_from_slice(&self.value_start.to_le_bytes());
+        mem[Self::DB_SUPPORT_VALUE_END_START..Self::DB_SUPPORT_VALUE_END_END]
+            .copy_from_slice(&self.value_end.to_le_bytes());
         return mem;
     }
 }
