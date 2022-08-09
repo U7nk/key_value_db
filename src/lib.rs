@@ -1,61 +1,22 @@
 extern crate core;
 
-use memmap::{MmapMut, MmapOptions };
-use std::{ fs::{ OpenOptions }, io::{ Seek, SeekFrom, Write } };
+use memmap::{MmapOptions };
+use std::{fmt, fs::{OpenOptions}, io::{Seek, SeekFrom, Write}};
+use std::any::TypeId;
+
 use std::error::Error;
+
 use std::str;
 mod mem_table;
 mod db_options;
+mod mmap_control;
+mod support_entry;
 
 use crate::mem_table::{Entry, MemTable};
+use crate::mmap_control::MmapControl;
+use crate::support_entry::SupportEntry;
 
-struct MmapControl {
-    mmap: MmapMut,
-    path: String,
-}
 
-impl MmapControl {
-    fn clear(&mut self) {
-        self.mmap.fill(0);
-    }
-}
-
-impl MmapControl {
-    fn new(mmap: MmapMut, path: String) -> MmapControl {
-        return MmapControl {
-            mmap,
-            path
-        };
-    }
-    
-    fn len(&self) -> usize { self.mmap.len() }
-    
-    fn write(&mut self, offset: usize, data: &[u8]) {
-        self.mmap[offset..offset + data.len() as usize].copy_from_slice(data);
-    }
-    
-    fn read(&self, offset: usize, count: usize) -> &[u8] {
-        return &self.mmap[offset..offset + count];
-    }
-    
-    fn resize(&mut self, new_size: u64)  -> Result<(), Box<dyn Error>> {
-        let db_options = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(self.path.to_string())
-            .expect("Failed to open db file");
-        db_options.set_len(new_size as u64)?;
-
-        self.mmap = unsafe {
-            MmapOptions::new()
-                .map_mut(&db_options)
-                .expect("Failed to map db file")
-        };
-        
-        Ok(())
-    }
-}
 struct PutResult {
     psl: u32
 }
@@ -65,6 +26,21 @@ pub struct DB {
     db_memory: MmapControl,
     mem_table: MemTable,
     max_psl: u32,
+}
+
+#[derive(Debug, Clone)]
+struct SupportFileTooSmall;
+
+impl Error for SupportFileTooSmall {
+    fn description(&self) -> &str {
+        "Cannot continue, support file is too small."
+    }
+}
+
+impl fmt::Display for SupportFileTooSmall {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Support file is too small, entry cannot be written.")
+    }
 }
 
 impl DB {
@@ -103,47 +79,14 @@ impl DB {
     const DB_SUPPORT_KEY_LEN_SIZE: usize = 4;
     
     pub fn open(path: &str) -> Result<DB, Box<dyn Error>> {
-        let mut support_options = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path.to_string() + ".kvdbs")
-            .expect("Failed to open db file");
-
-        support_options.seek(SeekFrom::Start(0))?;
-        let buf = vec![0; 64];
-        support_options.write(&buf)?;
-        support_options.seek(SeekFrom::Start(0))?;
-
-        let support_memory = unsafe {
-            MmapOptions::new()
-                .map_mut(&support_options)
-                .expect("Failed to map db file")
-        };
         
-
-        let mut db_options = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path.to_string() + ".kvdb")
-            .expect("Failed to open db file");
-        db_options.seek(SeekFrom::Start(0))?;
-        db_options.write(&buf)?;
-    
-        let mut db_memory = unsafe {
-            MmapOptions::new()
-                .map_mut(&db_options)
-                .expect("Failed to map db file")
-        };
-        db_memory[0..4].copy_from_slice(&[4, 0, 0, 0]);
-        
-        let db = DB {
-            support_memory: MmapControl::new(support_memory, path.to_string() + ".kvdbs"),
-            db_memory: MmapControl::new(db_memory, path.to_string() + ".kvdb"),
+        let mut db = DB {
+            support_memory: MmapControl::new(path.to_string() + ".kvdbs", 64),
+            db_memory: MmapControl::new(path.to_string() + ".kvdb", 64),
             mem_table: MemTable::new(),
             max_psl: 0
         };
+        db.db_memory.write(0, &[4, 0, 0, 0]);
         
         return Ok(db);
     }
@@ -176,112 +119,47 @@ impl DB {
                 self.db_memory.resize((self.db_memory.len() * 2) as u64).unwrap();
             }
             
-            let index = Self::align_hash(Self::get_hash(&self.mem_table.entries[i].key), self.support_memory.len() as u32) as usize;
-            let max_after_write_support_memory_len = index + ((self.max_psl + 2) as usize * Self::DB_SUPPORT_ENTRY_SIZE);
-            if self.support_memory.len() < max_after_write_support_memory_len {
-                self.support_memory.resize((self.support_memory.len() * 2) as u64).unwrap();
-                self.rehash_entries();
-            }
-            
-            let result = Self::write_entry_internal(&mut self.db_memory, &mut self.support_memory, &self.mem_table.entries[i]).unwrap();
-            if result.psl > self.max_psl {
-                self.max_psl = result.psl;
+            match Self::write_entry_internal(&mut self.db_memory, &mut self.support_memory, &self.mem_table.entries[i]) {
+                Ok(result) => {
+                    if result.psl > self.max_psl {
+                        self.max_psl = result.psl;
+                    }
+                }
+                Err(e) if e.is::<SupportFileTooSmall>() => {
+                    self.support_memory.resize((self.support_memory.len() * 2) as u64).unwrap();
+                    self.rehash_entries();
+                    Self::write_entry_internal(&mut self.db_memory, &mut self.support_memory, &self.mem_table.entries[i]).unwrap();
+                }
+                other_err => { other_err.unwrap(); }
             }
             i += 1;
         }
     }
     
-    fn read_psl(mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE]) -> u32 {
-        return u32::from_le_bytes(
-            mem[Self::DB_SUPPORT_PSL_START..Self::DB_SUPPORT_PSL_END]
-            .try_into()
-            .unwrap());
-    }
-    
-    fn write_psl(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], psl: u32) {
-        mem[Self::DB_SUPPORT_PSL_START..Self::DB_SUPPORT_PSL_END]
-            .copy_from_slice(&psl.to_le_bytes());
-    }
-    
-    fn set_occupied(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], occupied: bool) {
-        if occupied {
-            mem[Self::DB_SUPPORT_IS_OCCUPIED_START..Self::DB_SUPPORT_IS_OCCUPIED_END].copy_from_slice(&1u8.to_le_bytes());
-        }
-        else {
-            mem[Self::DB_SUPPORT_IS_OCCUPIED_START..Self::DB_SUPPORT_IS_OCCUPIED_END].copy_from_slice(&0u8.to_le_bytes());
-        }
-    }
-    
-    fn read_key_start(mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE]) -> u32 {
-        return u32::from_le_bytes(
-            mem[Self::DB_SUPPORT_KEY_START_START..Self::DB_SUPPORT_KEY_START_END]
-            .try_into()
-            .unwrap());
-    }
-    
-    fn write_key_start(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], key_start: u32) {
-        mem[Self::DB_SUPPORT_KEY_START_START..Self::DB_SUPPORT_KEY_START_END]
-            .copy_from_slice(&key_start.to_le_bytes());
-    }
-    
-    fn read_key_end(mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE]) -> u32 {
-        return u32::from_le_bytes(
-            mem[Self::DB_SUPPORT_KEY_END_START..Self::DB_SUPPORT_KEY_END_END]
-            .try_into()
-            .unwrap());
-    }
-    
-    fn write_key_end(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], key_end: u32) {
-        mem[Self::DB_SUPPORT_KEY_END_START..Self::DB_SUPPORT_KEY_END_END]
-            .copy_from_slice(&key_end.to_le_bytes());
-    }
-    
-    fn read_value_start(mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE]) -> u32 {
-        return u32::from_le_bytes(
-            mem[Self::DB_SUPPORT_VALUE_START_START..Self::DB_SUPPORT_VALUE_START_END]
-            .try_into()
-            .unwrap());
-    }
-    
-    fn write_value_start(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], value_start: u32) {
-        mem[Self::DB_SUPPORT_VALUE_START_START..Self::DB_SUPPORT_VALUE_START_END]
-            .copy_from_slice(&value_start.to_le_bytes());
-    }
-    
-    fn read_value_end(mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE]) -> u32 {
-        return u32::from_le_bytes(
-            mem[Self::DB_SUPPORT_VALUE_END_START..Self::DB_SUPPORT_VALUE_END_END]
-            .try_into()
-            .unwrap());
-    }
-    
-    fn write_value_end(mem: &mut [u8; Self::DB_SUPPORT_ENTRY_SIZE], value_end: u32) {
-        mem[Self::DB_SUPPORT_VALUE_END_START..Self::DB_SUPPORT_VALUE_END_END]
-            .copy_from_slice(&value_end.to_le_bytes());
-    }
-    
-  
-    
     fn write_entry_internal(db_memory: &mut MmapControl, support_memory: &mut MmapControl, entry: &Entry) -> Result<PutResult, Box<dyn Error>> {
+        
         let key_hash = Self::get_hash(&entry.key);
         let mut aligned_index = Self::align_hash(key_hash, support_memory.len() as u32) as usize;
-
-        let mut tmp_mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-            .try_into()
-            .unwrap();
+        
+        if support_memory.len() < aligned_index + Self::DB_SUPPORT_ENTRY_SIZE {
+            return Err(Box::new(SupportFileTooSmall));
+        }
+        
+        let mut support_entry = support_memory.read_support_entry(aligned_index);
+        
         let value_mem_addr_end = u32::from_le_bytes(db_memory.read(0, 4).try_into().unwrap());
 
         let key_start = value_mem_addr_end;
         let key_end = key_start + entry.key.len() as u32;
         db_memory.write(key_start as usize, entry.key.as_bytes());
 
-        Self::write_key_start(&mut tmp_mem, key_start);
-        Self::write_key_end(&mut tmp_mem, key_end);
+        support_entry.key_start = key_start; 
+        support_entry.key_end = key_end;
         
         let value_start: u32 = key_end;
         let mut value_end = value_start + entry.value.len() as u32;
-        Self::write_value_start(&mut tmp_mem, value_start);
-        Self::write_value_end(&mut tmp_mem, value_end);
+        support_entry.value_start = value_start;
+        support_entry.value_end = value_end;
         
 
         db_memory.write(value_start as usize, entry.value.as_bytes());
@@ -290,37 +168,35 @@ impl DB {
         db_memory.write(value_end as usize, &(entry.value.len() as u32).to_le_bytes());
         value_end += 4;
         
-        Self::set_occupied(&mut tmp_mem, true);
+        support_entry.is_occupied = true;
+        
         db_memory.write(0, &value_end.to_le_bytes());
         
-        let mut mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-            .try_into()
-            .unwrap();
-        
-        let mut is_occupied = mem[0] == 1u8;
-        let mut v_psl = 0;
-        while is_occupied {
-            v_psl += 1;
+        let mut walking_entry = support_memory.read_support_entry(aligned_index);
+        let mut current_psl = 0;
+        let mut walking_entry_is_occupied = walking_entry.is_occupied;
+        while walking_entry_is_occupied {
+            current_psl += 1;
             aligned_index += Self::DB_SUPPORT_ENTRY_SIZE;
-            mem = support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-                .try_into()
-                .unwrap();
-            is_occupied = mem[0] == 1u8;
-            if is_occupied {
-                let f_psl = Self::read_psl(mem);
-                if v_psl > f_psl {
-                    Self::write_psl(&mut tmp_mem, v_psl);
-                    support_memory.write(aligned_index, &tmp_mem);
-                    tmp_mem[0..Self::DB_SUPPORT_ENTRY_SIZE].copy_from_slice(&mem);
-                    v_psl = f_psl;
+            if support_memory.len() < aligned_index + Self::DB_SUPPORT_ENTRY_SIZE {
+                return Err(Box::new(SupportFileTooSmall));
+            }
+            walking_entry = support_memory.read_support_entry(aligned_index);
+            walking_entry_is_occupied = walking_entry.is_occupied;
+            if walking_entry.is_occupied {
+                if current_psl > walking_entry.probe_sequence_length {
+                    support_entry.probe_sequence_length = current_psl;
+                    current_psl = walking_entry.probe_sequence_length;
+                    
+                    support_memory.write(aligned_index, &support_entry.to_bytes());
+                    support_entry = walking_entry;
                 }
             }
         }
+        support_entry.probe_sequence_length = current_psl;
+        support_memory.write(aligned_index, &support_entry.to_bytes());
         
-        Self::write_psl(&mut tmp_mem, v_psl);
-        support_memory.write(aligned_index, &tmp_mem);
-        
-        Ok(PutResult { psl: v_psl })
+        Ok(PutResult { psl: current_psl })
     }
     
     fn get_hash(string: &String) -> u32 {
@@ -333,7 +209,7 @@ impl DB {
                     u32 % 24),
                 hash);
         }
-        return hash;    // todo return hash instead of 0
+        return hash;
     }
     
     fn align_hash(hash: u32, file_size: u32) -> u32 {
@@ -348,38 +224,28 @@ impl DB {
         
         let hash = Self::get_hash(&key);
         let mut aligned_index = Self::align_hash(hash, self.support_memory.len() as u32) as usize;
-        let mut mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = self.support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-            .try_into()
-            .unwrap();
         
-        let mut is_occupied = mem[0] == 1u8;
-        if !is_occupied {
+        let mut support_entry = self.support_memory.read_support_entry(aligned_index);
+        if !support_entry.is_occupied {
             return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Key not found")));
         }
         
-        let mut key_start: u32 = Self::read_key_start(mem);
-        let mut key_end: u32 = Self::read_key_end(mem);
-        let mut founded_key = str::from_utf8(&self.db_memory.read(key_start as usize, (key_end - key_start) as usize)).unwrap();
+        
+        let mut founded_key = str::from_utf8(self.db_memory.read_key(&support_entry)).unwrap();
+        let mut is_occupied = support_entry.is_occupied;
         
         while founded_key != key && is_occupied {
             aligned_index += Self::DB_SUPPORT_ENTRY_SIZE;
-            mem = self.support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-                .try_into()
-                .unwrap();
-            is_occupied = mem[0] == 1u8;
-            key_start = Self::read_key_start(mem);
-            key_end = Self::read_key_end(mem);
-            founded_key = str::from_utf8(&self.db_memory.read(key_start as usize, (key_end - key_start) as usize)).unwrap();
-            
+            support_entry = self.support_memory.read_support_entry(aligned_index);
+            is_occupied = support_entry.is_occupied;
+            founded_key = str::from_utf8(self.db_memory.read_key(&support_entry)).unwrap();
         }
         
         if !is_occupied {
             return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Key {} not found", key))));
         }
-
-        let value_start: u32 = Self::read_value_start(mem);
-        let value_end: u32 = Self::read_value_end(mem);
-        let value = str::from_utf8(&self.db_memory.read(value_start as usize, (value_end - value_start) as usize)).unwrap();
+        
+        let value = str::from_utf8(&self.db_memory.read_value(&support_entry)).unwrap();
         
         return Ok(value.to_string());
     }
@@ -401,45 +267,38 @@ impl DB {
             let key = str::from_utf8(self.db_memory.read(key_start as usize, key_len as usize)).unwrap();
             let mut aligned_index = Self::align_hash(Self::get_hash(&key.to_string()), self.support_memory.len() as u32) as usize;
             
-            let mut mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = self.support_memory.read(aligned_index as usize, Self::DB_SUPPORT_ENTRY_SIZE)
-                .try_into()
-                .unwrap();
+            let mut mem = self.support_memory.read_support_entry(aligned_index);
             
-            let mut tmp_mem: [u8; Self::DB_SUPPORT_ENTRY_SIZE] = self.support_memory.read(aligned_index as usize, Self::DB_SUPPORT_ENTRY_SIZE)
-                .try_into()
-                .unwrap();
-            tmp_mem[0] = 1u8;
-            Self::write_key_start(&mut tmp_mem, key_start);
-            Self::write_key_end(&mut tmp_mem, key_start + key_len);
-            Self::write_value_start(&mut tmp_mem, value_start);
-            Self::write_value_end(&mut tmp_mem, value_start + value_len);
-            
-            let mut is_occupied = mem[0] == 1u8;
+            let mut tmp_mem = self.support_memory.read_support_entry(aligned_index);
+            tmp_mem.is_occupied = true;
+            tmp_mem.key_start = key_start;
+            tmp_mem.key_end = key_start + key_len;
+            tmp_mem.value_start = value_start;
+            tmp_mem.value_end = value_start + value_len;
+                        
+            let mut is_occupied = mem.is_occupied;
             let mut v_psl = 0;
             while is_occupied {
                 v_psl += 1;
                 aligned_index += Self::DB_SUPPORT_ENTRY_SIZE;
-                mem = self.support_memory.read(aligned_index, Self::DB_SUPPORT_ENTRY_SIZE)
-                    .try_into()
-                    .unwrap();
-                is_occupied = mem[0] == 1u8;
+                mem = self.support_memory.read_support_entry(aligned_index);
+                is_occupied = mem.is_occupied;
                 if is_occupied {
-                    let f_psl = Self::read_psl(mem);
-                    if v_psl > f_psl {
-                        Self::write_psl(&mut tmp_mem, v_psl);
-                        self.support_memory.write(aligned_index, &tmp_mem);
-                        tmp_mem[0..Self::DB_SUPPORT_ENTRY_SIZE].copy_from_slice(&mem);
-                        v_psl = f_psl;
+                    if v_psl > mem.probe_sequence_length {
+                        tmp_mem.probe_sequence_length = v_psl;
+                        v_psl = mem.probe_sequence_length;
+                        self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
+                        tmp_mem = mem;
                     }
                 }
             }
 
-            Self::write_psl(&mut tmp_mem, v_psl);
+            tmp_mem.probe_sequence_length = v_psl;
             if v_psl > self.max_psl {
                 self.max_psl = v_psl;
             }
             
-            self.support_memory.write(aligned_index, &tmp_mem);
+            self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
             pointer -= value_len + key_len + ((Self::DB_SUPPORT_VALUE_LEN_SIZE + Self::DB_SUPPORT_KEY_LEN_SIZE) as u32);
         }
     }
@@ -448,7 +307,7 @@ impl DB {
 mod tests {
     use std::collections::HashMap;
     use std::error::Error;
-    use std::{fs, panic};
+    use std::fs;
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom, Write};
     use crate::DB;
