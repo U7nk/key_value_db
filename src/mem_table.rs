@@ -31,7 +31,7 @@ pub struct MemTable {
     pub entries: Vec<Entry>,
 }
 
-impl<'mem_table> MemTable {
+impl MemTable {
     pub fn new() -> MemTable {
         return MemTable {
             entries: Vec::new(),
