@@ -11,6 +11,7 @@ mod mem_table;
 mod db_options;
 mod mmap_control;
 mod support_entry;
+mod ss_table;
 
 use crate::mem_table::{Entry, MemTable};
 use crate::mmap_control::MmapControl;
@@ -205,21 +206,21 @@ impl DB {
         }
 
 
-        let mut founded_key = str::from_utf8(self.db_memory.read_key(&support_entry)).unwrap();
+        let mut founded_key = unsafe { str::from_utf8_unchecked(self.db_memory.read_key(&support_entry)) };
         let mut is_occupied = support_entry.is_occupied;
 
         while founded_key != key && is_occupied {
             aligned_index += SupportEntry::DB_SUPPORT_ENTRY_SIZE;
             support_entry = self.support_memory.read_support_entry(aligned_index);
             is_occupied = support_entry.is_occupied;
-            founded_key = str::from_utf8(self.db_memory.read_key(&support_entry)).unwrap();
+            unsafe { founded_key = str::from_utf8_unchecked(self.db_memory.read_key(&support_entry)); }
         }
 
         if !is_occupied {
             return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Key {} not found", key))));
         }
 
-        let value = str::from_utf8(&self.db_memory.read_value(&support_entry)).unwrap();
+        let value = unsafe { str::from_utf8_unchecked(&self.db_memory.read_value(&support_entry)) };
 
         return Ok(value.to_string());
     }
@@ -228,52 +229,54 @@ impl DB {
         self.support_memory.clear();
         self.max_psl = 0;
         let mut pointer = u32::from_le_bytes(self.db_memory.read(0, 4).try_into().unwrap());
-        while pointer > 4 {
-            let value_len =
-                u32::from_le_bytes(self.db_memory.read((pointer as usize) - Self::DB_VALUE_LEN_SIZE, 4)
-                    .try_into()
-                    .unwrap());
-            let value_start = pointer - value_len - Self::DB_VALUE_LEN_SIZE as u32 - Self::DB_KEY_LEN_SIZE as u32;
+        unsafe {
+            while pointer > 4 {
+                let value_len =
+                    u32::from_le_bytes(self.db_memory.read((pointer as usize) - Self::DB_VALUE_LEN_SIZE, 4)
+                        .try_into()
+                        .unwrap());
+                let value_start = pointer - value_len - Self::DB_VALUE_LEN_SIZE as u32 - Self::DB_KEY_LEN_SIZE as u32;
 
-            let key_len = u32::from_le_bytes(self.db_memory.read((pointer as usize) - Self::DB_VALUE_LEN_SIZE - Self::DB_KEY_LEN_SIZE, 4).try_into().unwrap());
-            let key_start = ((pointer as usize) - Self::DB_VALUE_LEN_SIZE - Self::DB_KEY_LEN_SIZE) as u32 - value_len - key_len;
+                let key_len = u32::from_le_bytes(self.db_memory.read((pointer as usize) - Self::DB_VALUE_LEN_SIZE - Self::DB_KEY_LEN_SIZE, 4).try_into().unwrap());
+                let key_start = ((pointer as usize) - Self::DB_VALUE_LEN_SIZE - Self::DB_KEY_LEN_SIZE) as u32 - value_len - key_len;
 
-            let key = str::from_utf8(self.db_memory.read(key_start as usize, key_len as usize)).unwrap();
-            let mut aligned_index = Self::align_hash(Self::get_hash(&key.to_string()), self.support_memory.len() as u32) as usize;
+                let key = str::from_utf8_unchecked(self.db_memory.read(key_start as usize, key_len as usize));
+                let mut aligned_index = Self::align_hash(Self::get_hash(&key.to_string()), self.support_memory.len() as u32) as usize;
 
-            let mut mem = self.support_memory.read_support_entry(aligned_index);
+                let mut mem = self.support_memory.read_support_entry(aligned_index);
 
-            let mut tmp_mem = self.support_memory.read_support_entry(aligned_index);
-            tmp_mem.is_occupied = true;
-            tmp_mem.key_start = key_start;
-            tmp_mem.key_end = key_start + key_len;
-            tmp_mem.value_start = value_start;
-            tmp_mem.value_end = value_start + value_len;
+                let mut tmp_mem = self.support_memory.read_support_entry(aligned_index);
+                tmp_mem.is_occupied = true;
+                tmp_mem.key_start = key_start;
+                tmp_mem.key_end = key_start + key_len;
+                tmp_mem.value_start = value_start;
+                tmp_mem.value_end = value_start + value_len;
 
-            let mut is_occupied = mem.is_occupied;
-            let mut v_psl = 0;
-            while is_occupied {
-                v_psl += 1;
-                aligned_index += SupportEntry::DB_SUPPORT_ENTRY_SIZE;
-                mem = self.support_memory.read_support_entry(aligned_index);
-                is_occupied = mem.is_occupied;
-                if is_occupied {
-                    if v_psl > mem.probe_sequence_length {
-                        tmp_mem.probe_sequence_length = v_psl;
-                        v_psl = mem.probe_sequence_length;
-                        self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
-                        tmp_mem = mem;
+                let mut is_occupied = mem.is_occupied;
+                let mut v_psl = 0;
+                while is_occupied {
+                    v_psl += 1;
+                    aligned_index += SupportEntry::DB_SUPPORT_ENTRY_SIZE;
+                    mem = self.support_memory.read_support_entry(aligned_index);
+                    is_occupied = mem.is_occupied;
+                    if is_occupied {
+                        if v_psl > mem.probe_sequence_length {
+                            tmp_mem.probe_sequence_length = v_psl;
+                            v_psl = mem.probe_sequence_length;
+                            self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
+                            tmp_mem = mem;
+                        }
                     }
                 }
-            }
 
-            tmp_mem.probe_sequence_length = v_psl;
-            if v_psl > self.max_psl {
-                self.max_psl = v_psl;
-            }
+                tmp_mem.probe_sequence_length = v_psl;
+                if v_psl > self.max_psl {
+                    self.max_psl = v_psl;
+                }
 
-            self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
-            pointer -= value_len + key_len + ((Self::DB_VALUE_LEN_SIZE + Self::DB_KEY_LEN_SIZE) as u32);
+                self.support_memory.write(aligned_index, &tmp_mem.to_bytes());
+                pointer -= value_len + key_len + ((Self::DB_VALUE_LEN_SIZE + Self::DB_KEY_LEN_SIZE) as u32);
+            }
         }
     }
 }
